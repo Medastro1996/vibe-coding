@@ -52,6 +52,8 @@
         <div id="top-bar">
             <div id="stats">
                 Gold: <span id="gold-res" class="resource-val">0</span> | 
+                Aeth: <span id="aeth-res" class="resource-val">0</span> | 
+                Pop: <span id="pop-res" class="resource-val">0</span> |
                 Islands: <span id="island-count">0</span> | 
                 Units: <span id="unit-count">0</span>
             </div>
@@ -69,6 +71,8 @@
             </div>
             <div class="actions" id="island-actions">
                 <button id="btn-mine" onclick="build('mine')">Build Mine <span class="cost">G:50</span></button>
+                <button id="btn-farm" onclick="build('farm')">Build Farm <span class="cost">G:30</span></button>
+                <button id="btn-windmill" onclick="build('windmill')">Build Windmill <span class="cost">G:60</span></button>
                 <button id="btn-barracks" onclick="build('barracks')">Build Barracks <span class="cost">G:100</span></button>
                 <button id="btn-research" onclick="build('lab')">Build Lab <span class="cost">G:150</span></button>
                 <div style="width: 100%; margin: 0; display: flex; gap: 8px; border-top: 1px solid #444; padding-top: 8px;">
@@ -88,12 +92,13 @@
         const ctx = canvas.getContext('2d');
         const UI = {
             gold: document.getElementById('gold-res'),
+            aeth: document.getElementById('aeth-res'),
+            pop: document.getElementById('pop-res'),
             bottom: document.getElementById('bottom-panel'),
             details: document.getElementById('island-details'),
             name: document.getElementById('island-name'),
             owner: document.getElementById('island-owner'),
-            hp: document.getElementById('island-hp'),
-            btnUnit: document.getElementById('btn-unit')
+            hp: document.getElementById('island-hp')
         };
 
         let gameState = 'setup';
@@ -118,6 +123,8 @@
         window.addEventListener('mouseup', () => { isDragging = false; });
         canvas.addEventListener('contextmenu', e => e.preventDefault());
         let lastTime = 0;
+        let cycleTimer = 0;
+        const CYCLE_DURATION = 90000;
         let myPlayerId = 0;
         let playerCount = 4;
 
@@ -133,11 +140,7 @@
                 this.stationedUnits = { soldier: 0, colony: 0 };
             }
             update(dt) {
-                if (this.owner !== -1) {
-                    const p = players[this.owner];
-                    const incomeRate = this.buildings.filter(b => b === 'mine').length * 5 + 1;
-                    p.gold += incomeRate * dt * 0.001;
-                }
+                // Production handled by cycle timer in game loop
             }
             draw() {
                 ctx.save(); ctx.translate(this.x, this.y);
@@ -222,7 +225,7 @@
         }
         function initMap() {
             players = []; islands = []; units = [];
-            for (let i = 0; i < playerCount; i++) players.push({ id: i, gold: 200, research: 0 });
+            for (let i = 0; i < playerCount; i++) players.push({ id: i, gold: 400, aetherum: 150, population: 0 });
             const radius = 300 + (playerCount * 20); const centerX = window.innerWidth / 2; const centerY = window.innerHeight / 2;
             const totalIslands = playerCount * 5;
             for (let i = 0; i < totalIslands; i++) {
@@ -269,7 +272,14 @@
             else { selectedIsland = null; updateUI(); }
         });
 
-        const BLD_DATA = { mine: {g:50, s:1}, barracks: {g:100, s:2}, lab: {g:150, s:2}, palace: {g:0, s:3} };
+        const BLD_DATA = { 
+            mine: {g:50, s:2, goldProd: 4}, 
+            barracks: {g:100, s:2}, 
+            lab: {g:150, s:2}, 
+            palace: {g:0, s:3, popCap: 5, goldProd: 7, aethProd: 2},
+            farm: {g:30, s:1, popCap: 2},
+            windmill: {g:60, s:2, popCap: 4}
+        };
         function updateUI() {
             if (!selectedIsland) { UI.bottom.classList.remove('visible'); return; }
             UI.bottom.classList.add('visible');
@@ -289,7 +299,11 @@
                 });
             }
             const isMy = selectedIsland.owner === myPlayerId; const hasBar = selectedIsland.buildings.includes('barracks');
-            document.getElementById('btn-mine').disabled = !isMy; document.getElementById('btn-barracks').disabled = !isMy; document.getElementById('btn-research').disabled = !isMy;
+            document.getElementById('btn-mine').disabled = !isMy;
+            document.getElementById('btn-farm').disabled = !isMy;
+            document.getElementById('btn-windmill').disabled = !isMy;
+            document.getElementById('btn-barracks').disabled = !isMy; 
+            document.getElementById('btn-research').disabled = !isMy;
             document.getElementById('btn-unit-train').disabled = !isMy || !hasBar;
             document.getElementById('btn-colony-train').disabled = !isMy || !hasBar;
             document.getElementById('btn-unit-send').disabled = !isMy || selectedIsland.stationedUnits.soldier <= 0;
@@ -343,7 +357,7 @@
                 const pIslands = islands.filter(isl => isl.owner === p.id);
                 if (pIslands.length === 0) return;
                 pIslands.forEach(isl => {
-                    const types = ['mine', 'barracks', 'lab'];
+                    const types = ['mine', 'barracks', 'lab', 'farm', 'windmill'];
                     const t = types[Math.floor(Math.random() * types.length)];
                     const data = BLD_DATA[t];
                     if (p.gold >= data.g && (isl.usedSlots + data.s <= isl.maxSlots) && Math.random() < 0.005) {
@@ -391,6 +405,7 @@
             ctx.restore();
 
             if (gameState === 'playing') {
+                processResources(dt);
                 aiLogic(dt);
                 updateStats();
                 checkWinCondition();
@@ -399,8 +414,32 @@
             requestAnimationFrame(gameLoop);
         }
 
+        function processResources(dt) {
+            cycleTimer += dt;
+            const isCycle = cycleTimer >= CYCLE_DURATION;
+            players.forEach(p => {
+                let totalCap = 0; let goldIncome = 0; let aethIncome = 0;
+                islands.filter(isl => isl.owner === p.id).forEach(isl => {
+                    isl.buildings.forEach(b => {
+                        const d = BLD_DATA[b];
+                        if (d.popCap) totalCap += d.popCap; if (d.goldProd) goldIncome += d.goldProd; if (d.aethProd) aethIncome += d.aethProd;
+                    });
+                });
+                if (isCycle) {
+                    p.gold += goldIncome; p.aetherum += aethIncome;
+                }
+                const rate = 0.05; const pop = p.population;
+                if (pop < totalCap) p.population += totalCap * rate * (dt / 1000);
+                else if (pop < totalCap + 2) p.population += (totalCap * rate * (dt / 1000)) / 10;
+                else if (pop >= totalCap + 3) p.population -= (pop - (totalCap + 2)) * rate * (dt / 1000);
+            });
+            if (isCycle) cycleTimer -= CYCLE_DURATION;
+        }
+
         function updateStats() {
             UI.gold.innerText = Math.floor(players[myPlayerId].gold);
+            UI.aeth.innerText = Math.floor(players[myPlayerId].aetherum);
+            UI.pop.innerText = Math.floor(players[myPlayerId].population);
             document.getElementById('island-count').innerText = islands.filter(i => i.owner === myPlayerId).length;
             document.getElementById('unit-count').innerText = units.filter(u => u.playerId === myPlayerId).length;
             const time = Math.floor(lastTime / 1000);
